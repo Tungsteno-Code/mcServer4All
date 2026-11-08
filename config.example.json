@@ -28,10 +28,7 @@
   "maxBackupsToKeep": 5,
 
   "serverPort": 25565,
-  "whitelistPlayers": [
-    "player_alpha",
-    "player_beta"
-  ],
+  "whitelistPlayers": [],
   "acceptEula": true,
   "idleShutdownSeconds": 60,
   "playerPollIntervalSeconds": 15,

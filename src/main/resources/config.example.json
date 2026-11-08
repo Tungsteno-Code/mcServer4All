@@ -1,0 +1,65 @@
+{
+  "playerId": "player_alpha",
+  "localTailscaleIp": "auto",
+
+  "storageBackend": "GIT",
+  "gitRemoteUrl": "https://github.com/<TUO_UTENTE>/<TUA_REPO_PRIVATA>.git",
+  "gitToken": "<GITHUB_PERSONAL_ACCESS_TOKEN>",
+  "gitBranch": "mcsync-state",
+
+  "serverDirectory": "C:/MinecraftServer",
+  "serverStartCommand": [
+    "run.bat",
+    "nogui"
+  ],
+  "worldFolderName": "world",
+
+  "clientLaunchCommand": [
+    "%LOCALAPPDATA%/Programs/PrismLauncher/prismlauncher.exe",
+    "--launch",
+    "ModdedSharedWorld",
+    "--server",
+    "{serverAddress}"
+  ],
+
+  "discordWebhookUrl": "",
+  "heartbeatIntervalSeconds": 30,
+  "lockTimeoutSeconds": 120,
+  "maxBackupsToKeep": 5,
+
+  "serverPort": 25565,
+  "whitelistPlayers": [],
+  "acceptEula": true,
+  "idleShutdownSeconds": 60,
+  "playerPollIntervalSeconds": 15,
+  "initialJoinGraceSeconds": 900,
+  "serverStartTimeoutSeconds": 900,
+  "stopTimeoutSeconds": 60,
+  "hostWaitTimeoutSeconds": 900,
+  "localClientAddress": "auto",
+  "clientSyncScope": "MODS_ONLY",
+  "modSyncMode": "DIFFERENTIAL",
+  "clientInstanceDirectory": "%APPDATA%/PrismLauncher/instances/ModdedSharedWorld/minecraft",
+  "modSyncExtensions": [
+    ".jar",
+    ".json",
+    ".toml",
+    ".cfg",
+    ".snbt"
+  ],
+  "modSyncExcludes": [
+    "mods/oculus*",
+    "mods/iris*",
+    "mods/sodium*",
+    "mods/embeddium*",
+    "config/sodium*",
+    "config/iris*"
+  ],
+  "echoServerOutput": true,
+
+  "worlds": [],
+  "activeWorldId": "",
+  "serversRoot": "",
+  "curseforgeApiKey": "",
+  "cacheDirectory": ""
+}

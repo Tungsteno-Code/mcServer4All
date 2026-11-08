@@ -2,19 +2,32 @@
 
 # Configurazioni personali (token e percorsi locali dell'utente)
 config.json
+/config.json
 
 # Dati di gioco, mondi e log locali del server
 servers/
+/servers/
+.local_backup/
+/.local_backup/
 
 # File e cache di sincronizzazione mondi
 .mcsync/
+/.mcsync/
 *.mcsync
 
 # Runtime Java e PrismLauncher portatili (scaricati in automatico da launch.bat/launch.sh)
 .tools/
+/.tools/
 
-# File temporanei, cartelle di test e log di sistema
+# Artefatti intermedi di compilazione Maven (mcServer4all.jar nella root è tracciato per distribuzione)
+/target/
+/dist/
+/mc-sync-launcher.jar
+
+# File temporanei, cartelle di test, IDE e log di sistema
 *.log
+.idea/
+.vscode/
 Nuova cartella/
 .DS_Store
 Thumbs.db
