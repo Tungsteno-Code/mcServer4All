@@ -59,14 +59,21 @@ public final class IntegratedHostController {
     private final CountDownLatch readyLatch = new CountDownLatch(1);
 
     private volatile Process clientProcess;
+    private volatile ProcessHandle delegatedMcJvm;
     private volatile ServerSocket tcpBridgeServer;
     private volatile int internalLanPort = -1;
     private volatile boolean stopping;
     private volatile Instant readyAt;
+    private volatile Instant sessionStartInstant = Instant.now();
+    private volatile Runnable onReadyCallback;
 
     public IntegratedHostController(Config cfg, ServerProcessController.Listener listener) {
         this.cfg = cfg;
         this.listener = listener;
+    }
+
+    public void setOnReadyCallback(Runnable onReadyCallback) {
+        this.onReadyCallback = onReadyCallback;
     }
 
     /** Returns the saves/<worldName> path inside the Prism client instance. */
@@ -82,6 +89,7 @@ public final class IntegratedHostController {
      * and injects KubeJS auto-LAN helper if {@code kubejs/} is present.
      */
     public void prepareClientWorldForHosting() throws IOException {
+        this.sessionStartInstant = Instant.now();
         Path gameDir = cfg.clientInstanceDir();
         if (gameDir == null) {
             throw new IOException("clientInstanceDirectory non configurata per Single-JVM Host");
@@ -90,12 +98,25 @@ public final class IntegratedHostController {
         Path saveDir = clientWorldSaveDir();
         Path syncedWorld = cfg.worldDir();
 
-        if (Files.isDirectory(syncedWorld) && !syncedWorld.equals(saveDir)) {
-            syncDirectory(syncedWorld, saveDir);
+        boolean syncedHasLevelDat = Files.isRegularFile(syncedWorld.resolve("level.dat"));
+        boolean saveHasLevelDat = Files.isRegularFile(saveDir.resolve("level.dat"));
+
+        if (syncedHasLevelDat) {
+            if (!syncedWorld.equals(saveDir)) {
+                syncDirectory(syncedWorld, saveDir);
+            }
+            LevelDatCleaner.cleanWorldDir(saveDir);
+        } else if (saveHasLevelDat) {
+            LevelDatCleaner.cleanWorldDir(saveDir);
+            if (!syncedWorld.equals(saveDir)) {
+                syncDirectory(saveDir, syncedWorld);
+            }
         } else {
-            Files.createDirectories(saveDir);
+            // Do NOT create an empty saves/world folder without level.dat, as it confuses Minecraft Singleplayer
+            if (Files.exists(saveDir)) {
+                FileUtils.deleteRecursively(saveDir);
+            }
         }
-        LevelDatCleaner.cleanWorldDir(saveDir);
         ensurePauseOnLostFocusDisabled(gameDir);
         configurePrismQuickPlaySingleplayer(gameDir.getParent(), cfg.worldFolderName());
         injectKubeJsAutoLanIfPresent(gameDir, cfg.serverPort());
@@ -122,10 +143,39 @@ public final class IntegratedHostController {
         if (!Files.isRegularFile(instanceCfg)) return;
         try {
             List<String> lines = new ArrayList<>(Files.readAllLines(instanceCfg, StandardCharsets.UTF_8));
-            // Note: Prism passes ExtraArgs/MinecraftArgs or user can click Singleplayer -> world
-            boolean hasOverride = lines.stream().anyMatch(l -> l.startsWith("OverrideMemory="));
+            boolean changed = false;
+            boolean hasOverride = false;
+            boolean hasMax = false;
+            for (int i = 0; i < lines.size(); i++) {
+                String line = lines.get(i).trim();
+                if (line.startsWith("OverrideMemory=")) {
+                    hasOverride = true;
+                    if (!line.equals("OverrideMemory=true")) {
+                        lines.set(i, "OverrideMemory=true");
+                        changed = true;
+                    }
+                } else if (line.startsWith("MaxMemAlloc=")) {
+                    hasMax = true;
+                    try {
+                        int cur = Integer.parseInt(line.substring("MaxMemAlloc=".length()).trim());
+                        if (cur < 8192) {
+                            lines.set(i, "MaxMemAlloc=8192");
+                            changed = true;
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
             if (!hasOverride) {
                 lines.add("OverrideMemory=true");
+                changed = true;
+            }
+            if (!hasMax) {
+                lines.add("MinMemAlloc=4096");
+                lines.add("MaxMemAlloc=8192");
+                changed = true;
+            }
+            if (changed) {
                 Files.write(instanceCfg, lines, StandardCharsets.UTF_8);
             }
         } catch (IOException ignored) {
@@ -138,12 +188,56 @@ public final class IntegratedHostController {
      * uploads the exact delta.
      */
     public void syncSaveBackToWorldDir() throws IOException {
+        Path gameDir = cfg.clientInstanceDir();
         Path saveDir = clientWorldSaveDir();
         Path syncedWorld = cfg.worldDir();
-        if (Files.isDirectory(saveDir) && !saveDir.equals(syncedWorld)) {
-            syncDirectory(saveDir, syncedWorld);
+
+        // Check if the player created a new world under a different folder name in saves/ during this session
+        if (gameDir != null && Files.isDirectory(gameDir.resolve("saves"))) {
+            Path bestCandidate = findMostRecentWorldSave(gameDir.resolve("saves"), saveDir);
+            if (bestCandidate != null && !bestCandidate.equals(saveDir)) {
+                log.info("Rilevato mondo salvato in '{}' -> allineamento con '{}'",
+                        bestCandidate.getFileName(), saveDir.getFileName());
+                syncDirectory(bestCandidate, saveDir);
+            }
         }
-        LevelDatCleaner.cleanWorldDir(syncedWorld);
+
+        if (Files.isRegularFile(saveDir.resolve("level.dat"))) {
+            if (!saveDir.equals(syncedWorld)) {
+                syncDirectory(saveDir, syncedWorld);
+            }
+            LevelDatCleaner.cleanWorldDir(syncedWorld);
+        } else if (Files.exists(syncedWorld) && !Files.isRegularFile(syncedWorld.resolve("level.dat"))) {
+            FileUtils.deleteRecursively(syncedWorld);
+        }
+    }
+
+    private Path findMostRecentWorldSave(Path savesRoot, Path preferredSaveDir) {
+        try (Stream<Path> dirs = Files.list(savesRoot)) {
+            Path newest = null;
+            Instant newestTime = Instant.MIN;
+            for (Path d : dirs.filter(Files::isDirectory).toList()) {
+                Path levelDat = d.resolve("level.dat");
+                if (!Files.isRegularFile(levelDat)) continue;
+                Instant mtime = Files.getLastModifiedTime(levelDat).toInstant();
+                if (newest == null || mtime.isAfter(newestTime)) {
+                    newest = d;
+                    newestTime = mtime;
+                }
+            }
+            if (newest == null) return null;
+            if (!Files.isRegularFile(preferredSaveDir.resolve("level.dat"))) {
+                return newest;
+            }
+            Instant prefTime = Files.getLastModifiedTime(preferredSaveDir.resolve("level.dat")).toInstant();
+            if (newestTime.isAfter(prefTime.plusSeconds(5))
+                    && newestTime.isAfter(sessionStartInstant.minusSeconds(10))) {
+                return newest;
+            }
+            return preferredSaveDir;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     private static void syncDirectory(Path src, Path dst) throws IOException {
@@ -195,31 +289,119 @@ public final class IntegratedHostController {
         }
     }
 
+    private static boolean hasKubeJsMod(Path modsDir) {
+        if (!Files.isDirectory(modsDir)) return false;
+        try (Stream<Path> s = Files.list(modsDir)) {
+            return s.anyMatch(p -> {
+                String n = p.getFileName().toString().toLowerCase(Locale.ROOT);
+                return n.startsWith("kubejs") && n.endsWith(".jar");
+            });
+        } catch (IOException e) {
+            return false;
+        }
+    }
+
     private static void injectKubeJsAutoLanIfPresent(Path gameDir, int port) {
         Path kubejsDir = gameDir.resolve("kubejs");
-        if (!Files.isDirectory(kubejsDir)) return;
+        if (!Files.isDirectory(kubejsDir) && !hasKubeJsMod(gameDir.resolve("mods"))) return;
         try {
             Path serverScripts = kubejsDir.resolve("server_scripts");
             Files.createDirectories(serverScripts);
             Path script = serverScripts.resolve("_mcsync_autolan.js");
             String js = """
                     // Auto-generated by mcServer4all (Single-JVM Integrated Host)
-                    if (typeof ServerEvents !== 'undefined') {
-                      ServerEvents.loaded(event => {
-                        try {
-                          let srv = event.server;
-                          if (srv && !srv.isDedicatedServer() && !srv.isPublished()) {
-                            srv.publishServer(srv.getDefaultGameType(), true, %d);
+                    let _mcsyncLanPublished = false;
+                    let _mcsyncTickCounter = 0;
+                    function _mcsyncTryPublish(srv) {
+                      if (_mcsyncLanPublished || !srv) return;
+                      try {
+                        if (srv.isDedicatedServer && srv.isDedicatedServer()) {
+                          _mcsyncLanPublished = true;
+                          return;
+                        }
+                        if (srv.isPublished && srv.isPublished()) {
+                          _mcsyncLanPublished = true;
+                          return;
+                        }
+                        if (srv.runCommandSilent) {
+                          srv.runCommandSilent('publish true survival %d');
+                        }
+                        if (srv.isPublished && srv.isPublished()) {
+                          _mcsyncLanPublished = true;
+                          console.info('Local game hosted on port %d');
+                          return;
+                        }
+                        if (srv.publishServer) {
+                          let gm = srv.getDefaultGameType ? srv.getDefaultGameType() : null;
+                          let ok = srv.publishServer(gm, true, %d);
+                          if (ok) {
+                            _mcsyncLanPublished = true;
                             console.info('Local game hosted on port %d');
+                            return;
                           }
-                        } catch (e) {}
+                        }
+                        if (srv.runCommandSilent) {
+                          srv.runCommandSilent('publish');
+                        }
+                        if (srv.isPublished && srv.isPublished()) {
+                          _mcsyncLanPublished = true;
+                        }
+                      } catch (e) {}
+                    }
+                    if (typeof PlayerEvents !== 'undefined') {
+                      PlayerEvents.loggedIn((event) => {
+                        _mcsyncTryPublish(event.server);
                       });
                     }
-                    """.formatted(port, port);
+                    if (typeof ServerEvents !== 'undefined') {
+                      ServerEvents.loaded((event) => {
+                        _mcsyncTryPublish(event.server);
+                      });
+                      ServerEvents.tick((event) => {
+                        if (!_mcsyncLanPublished && (++_mcsyncTickCounter %% 60 === 0)) {
+                          _mcsyncTryPublish(event.server);
+                        }
+                      });
+                    }
+                    """.formatted(port, port, port, port);
             Files.writeString(script, js, StandardCharsets.UTF_8);
         } catch (IOException e) {
             log.debug("Impossibile scrivere _mcsync_autolan.js: {}", e.getMessage());
         }
+    }
+
+    private static Set<Long> snapshotJavaPids() {
+        Set<Long> pids = new HashSet<>();
+        long myPid = ProcessHandle.current().pid();
+        ProcessHandle.allProcesses().forEach(ph -> {
+            if (ph.pid() == myPid) return;
+            ph.info().command().ifPresent(cmd -> {
+                String lc = cmd.toLowerCase(Locale.ROOT);
+                if (lc.endsWith("java.exe") || lc.endsWith("javaw.exe")
+                        || lc.endsWith("/java") || lc.endsWith("\\java")) {
+                    pids.add(ph.pid());
+                }
+            });
+        });
+        return pids;
+    }
+
+    private static Optional<ProcessHandle> findNewMinecraftJvm(Set<Long> preExistingJavaPids, Instant launchedAt) {
+        long myPid = ProcessHandle.current().pid();
+        return ProcessHandle.allProcesses()
+                .filter(ph -> ph.pid() != myPid && ph.isAlive() && !preExistingJavaPids.contains(ph.pid()))
+                .filter(ph -> {
+                    Optional<String> cmd = ph.info().command();
+                    if (cmd.isEmpty()) return false;
+                    String lc = cmd.get().toLowerCase(Locale.ROOT);
+                    if (!(lc.endsWith("java.exe") || lc.endsWith("javaw.exe")
+                            || lc.endsWith("/java") || lc.endsWith("\\java"))) {
+                        return false;
+                    }
+                    Optional<Instant> start = ph.info().startInstant();
+                    return start.isEmpty() || !start.get().isBefore(launchedAt.minusSeconds(5));
+                })
+                .findFirst();
     }
 
     /** Starts Prism Launcher directly into the Singleplayer world and tails {@code logs/latest.log}. */
@@ -227,6 +409,9 @@ public final class IntegratedHostController {
         Path gameDir = cfg.clientInstanceDir();
         Path latestLog = gameDir != null ? gameDir.resolve("logs").resolve("latest.log") : null;
         long initialLogOffset = (latestLog != null && Files.isRegularFile(latestLog)) ? Files.size(latestLog) : 0L;
+        Set<Long> preExistingJavaPids = snapshotJavaPids();
+        Instant launchedAt = Instant.now();
+        this.sessionStartInstant = launchedAt;
 
         this.clientProcess = launcher.launchSingleplayerHost(cfg.worldFolderName());
 
@@ -235,6 +420,16 @@ public final class IntegratedHostController {
         tailThread.start();
 
         clientProcess.onExit().thenAccept(p -> {
+            if (stopping) return;
+            long livedSeconds = Duration.between(launchedAt, Instant.now()).getSeconds();
+            if (livedSeconds < 30 && p.exitValue() == 0) {
+                // Prism Launcher single-instance IPC: prism forwarded --launch to an existing Prism window and exited!
+                Thread ipcMonitor = new Thread(() -> monitorDelegatedJvm(preExistingJavaPids, launchedAt, latestLog),
+                        "prism-ipc-monitor");
+                ipcMonitor.setDaemon(true);
+                ipcMonitor.start();
+                return;
+            }
             stopping = true;
             closeBridge();
             readyLatch.countDown();
@@ -243,29 +438,87 @@ public final class IntegratedHostController {
         return clientProcess;
     }
 
+    private void monitorDelegatedJvm(Set<Long> preExistingJavaPids, Instant launchedAt, Path latestLog) {
+        log.info("Prism Launcher ha delegato l'avvio all'istanza già aperta: attendo il processo JVM di Minecraft ...");
+        ProcessHandle mcJvm = null;
+        for (int i = 0; i < 45 && !stopping; i++) {
+            Optional<ProcessHandle> found = findNewMinecraftJvm(preExistingJavaPids, launchedAt);
+            if (found.isPresent()) {
+                mcJvm = found.get();
+                this.delegatedMcJvm = mcJvm;
+                log.info("Rilevato processo JVM di Minecraft (PID {}) — monitoraggio sessione attivo.", mcJvm.pid());
+                break;
+            }
+            FileUtils.sleepQuietly(1000L);
+        }
+        if (mcJvm != null) {
+            while (!stopping && mcJvm.isAlive()) {
+                FileUtils.sleepQuietly(1000L);
+            }
+        } else if (latestLog != null) {
+            // Fallback: wait while latest.log is actively modified after launchedAt
+            while (!stopping) {
+                try {
+                    if (Files.isRegularFile(latestLog)) {
+                        Instant mtime = Files.getLastModifiedTime(latestLog).toInstant();
+                        if (mtime.isAfter(launchedAt) && Duration.between(mtime, Instant.now()).getSeconds() < 120) {
+                            FileUtils.sleepQuietly(2000L);
+                            continue;
+                        }
+                    }
+                } catch (IOException ignored) {
+                }
+                break;
+            }
+        }
+        if (!stopping) {
+            stopping = true;
+            closeBridge();
+            readyLatch.countDown();
+            listener.onServerExited(0, true);
+        }
+    }
+
     public boolean awaitReady(Duration timeout) throws InterruptedException {
         boolean ok = readyLatch.await(timeout.toMillis(), TimeUnit.MILLISECONDS);
         return ok && readyAt != null && isRunning();
     }
 
     public boolean isRunning() {
+        if (stopping) return false;
         Process p = clientProcess;
-        return p != null && p.isAlive() && !stopping;
+        if (p != null && p.isAlive()) return true;
+        ProcessHandle del = delegatedMcJvm;
+        return del != null && del.isAlive();
     }
 
     public Instant readyAt() {
         return readyAt;
     }
 
-    private void tailClientLog(Path latestLog, long startOffset) {
-        if (latestLog == null) {
+    private void notifyReadyOnce() {
+        if (readyAt == null) {
             readyAt = Instant.now();
             readyLatch.countDown();
+            Runnable cb = onReadyCallback;
+            if (cb != null) {
+                onReadyCallback = null;
+                try {
+                    cb.run();
+                } catch (Exception ignored) {
+                }
+            }
+        }
+    }
+
+    private void tailClientLog(Path latestLog, long startOffset) {
+        if (latestLog == null) {
+            notifyReadyOnce();
             return;
         }
         long offset = startOffset;
         boolean sawWorldStart = false;
-        while (!stopping && clientProcess != null && clientProcess.isAlive()) {
+        while (!stopping) {
             try {
                 if (Files.isRegularFile(latestLog)) {
                     long len = Files.size(latestLog);
@@ -309,9 +562,8 @@ public final class IntegratedHostController {
             return;
         }
         if (readyAt == null && INTEGRATED_READY.matcher(line).matches()) {
-            readyAt = Instant.now();
             log.info("IntegratedServer avviato nel Client! Pubblicazione LAN su porta {} ...", cfg.serverPort());
-            readyLatch.countDown();
+            notifyReadyOnce();
             return;
         }
         Matcher jl = ServerProcessController.JOIN_LEAVE.matcher(line);
@@ -329,10 +581,7 @@ public final class IntegratedHostController {
 
     private void onLanPublished(int port) {
         this.internalLanPort = port;
-        if (readyAt == null) {
-            readyAt = Instant.now();
-            readyLatch.countDown();
-        }
+        notifyReadyOnce();
         if (port != cfg.serverPort()) {
             startTcpPortBridge(cfg.serverPort(), port);
         } else {

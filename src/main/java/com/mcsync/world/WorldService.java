@@ -408,6 +408,27 @@ public final class WorldService {
                 String host = null;
                 switch (insp.state()) {
                     case FREE -> live = Live.FREE;
+                    case OWN_LEFTOVER -> {
+                        if (com.mcsync.MainOrchestrator.isSessionActive()) {
+                            host = insp.lock().ownerId();
+                            live = switch (insp.lock().status()) {
+                                case STARTING -> Live.STARTING;
+                                case STOPPING -> Live.STOPPING;
+                                default -> Live.ONLINE;
+                            };
+                        } else {
+                            // Leftover lock owned by this player while no local session is running: clean it up!
+                            boolean hasValidLocalWorld = Files.isRegularFile(wc.worldDir().resolve("level.dat"));
+                            if (!ls.dirty() || !hasValidLocalWorld) {
+                                try {
+                                    st.delete(LockManager.LOCK_KEY);
+                                } catch (Exception ignored) {
+                                }
+                            }
+                            live = Live.FREE;
+                            host = null;
+                        }
+                    }
                     case STALE -> {
                         live = Live.STALE;
                         host = insp.lock().ownerId();

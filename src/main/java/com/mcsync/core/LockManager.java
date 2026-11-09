@@ -91,7 +91,8 @@ public final class LockManager implements AutoCloseable {
         long age = Instant.now().getEpochSecond() - lock.lastHeartbeat();
 
         if (cfg.playerId().equals(lock.ownerId())
-                && (lock.hostIp() == null || lock.hostIp().equals(cfg.localTailscaleIp())
+                && (lock.hostIp() == null || "auto".equalsIgnoreCase(cfg.localTailscaleIp())
+                || lock.hostIp().equals(cfg.localTailscaleIp())
                 || age > cfg.lockTimeoutSeconds())) {
             return new Inspection(State.OWN_LEFTOVER, lock, fetched.get().eTag(), age);
         }

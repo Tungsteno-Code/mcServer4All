@@ -57,14 +57,18 @@ public final class PrismInstanceWriter {
         Files.createDirectories(game.resolve("mods"));
         Files.createDirectories(game.resolve("config"));
 
+        int effectiveMaxMb = Math.max(ramMaxMb, 8192);
+        int effectiveMinMb = Math.min(Math.max(ramMinMb, 4096), effectiveMaxMb);
+
         Path cfg = inst.resolve("instance.cfg");
-        String extraArgs = "--quickPlaySingleplayer " + worldId;
         if (!Files.isRegularFile(cfg)) {
             String text = "[General]\nConfigVersion=1.2\nInstanceType=OneSix\niconKey=default\n"
                     + "name=" + displayName.replace('\n', ' ') + "\n"
-                    + "OverrideMemory=true\nMinMemAlloc=" + ramMinMb + "\nMaxMemAlloc=" + ramMaxMb + "\n"
+                    + "OverrideMemory=true\nMinMemAlloc=" + effectiveMinMb + "\nMaxMemAlloc=" + effectiveMaxMb + "\n"
                     + "OverrideCommands=false\n";
             Files.writeString(cfg, text, StandardCharsets.UTF_8);
+        } else {
+            upgradeInstanceMemoryIfNeeded(cfg, effectiveMinMb, effectiveMaxMb);
         }
         Path pack = inst.resolve("mmc-pack.json");
         byte[] wanted = Json.toBytes(components(minecraft, loader));
@@ -95,6 +99,48 @@ public final class PrismInstanceWriter {
             default -> throw new IllegalArgumentException("Loader non supportato: " + loader.type());
         }
         return root;
+    }
+
+    private static void upgradeInstanceMemoryIfNeeded(Path cfg, int minMb, int maxMb) {
+        try {
+            List<String> lines = new java.util.ArrayList<>(Files.readAllLines(cfg, StandardCharsets.UTF_8));
+            boolean changed = false;
+            boolean hasMax = false;
+            boolean hasOverride = false;
+            for (int i = 0; i < lines.size(); i++) {
+                String line = lines.get(i).trim();
+                if (line.startsWith("OverrideMemory=")) {
+                    hasOverride = true;
+                    if (!line.equals("OverrideMemory=true")) {
+                        lines.set(i, "OverrideMemory=true");
+                        changed = true;
+                    }
+                } else if (line.startsWith("MaxMemAlloc=")) {
+                    hasMax = true;
+                    try {
+                        int cur = Integer.parseInt(line.substring("MaxMemAlloc=".length()).trim());
+                        if (cur < maxMb) {
+                            lines.set(i, "MaxMemAlloc=" + maxMb);
+                            changed = true;
+                        }
+                    } catch (NumberFormatException ignored) {
+                    }
+                }
+            }
+            if (!hasOverride) {
+                lines.add("OverrideMemory=true");
+                changed = true;
+            }
+            if (!hasMax) {
+                lines.add("MinMemAlloc=" + minMb);
+                lines.add("MaxMemAlloc=" + maxMb);
+                changed = true;
+            }
+            if (changed) {
+                Files.write(cfg, lines, StandardCharsets.UTF_8);
+            }
+        } catch (IOException ignored) {
+        }
     }
 
     private static boolean sameComponents(Path pack, byte[] wanted) {

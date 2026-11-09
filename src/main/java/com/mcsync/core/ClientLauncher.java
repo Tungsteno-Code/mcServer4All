@@ -83,7 +83,8 @@ public final class ClientLauncher {
     /**
      * Starts the client in Singleplayer / IntegratedServer mode for Single-JVM hosting:
      * removes {@code --server {serverAddress}} from the Prism command so the Host doesn't try to connect
-     * to a dedicated server before the IntegratedServer is started.
+     * to a dedicated server before the IntegratedServer is started, and adds {@code --world <worldFolderName>}
+     * when the world save already exists on disk so Prism boots straight into the Singleplayer world.
      */
     public Process launchSingleplayerHost(String worldFolderName) throws IOException {
         List<String> raw = new java.util.ArrayList<>(cfg.clientLaunchCommand());
@@ -91,6 +92,13 @@ public final class ClientLauncher {
         if (srvIdx >= 0) {
             raw.remove(srvIdx);
             if (srvIdx < raw.size()) raw.remove(srvIdx);
+        }
+        Path gameDir = cfg.clientInstanceDir();
+        boolean worldSaveExists = gameDir != null
+                && Files.isRegularFile(gameDir.resolve("saves").resolve(worldFolderName).resolve("level.dat"));
+        if (worldSaveExists && !raw.contains("--world") && !raw.contains("-w")) {
+            raw.add("--world");
+            raw.add(worldFolderName);
         }
         List<String> cmd = ProcessUtils.prepareCommand(raw, Map.of(
                 "worldFolderName", worldFolderName,
@@ -107,7 +115,8 @@ public final class ClientLauncher {
         }
         Path logFile = cfg.stateDir().resolve("logs").resolve("client.log");
         Files.createDirectories(logFile.getParent());
-        log.info("Avvio Minecraft in modalità Single-JVM Host (Mondo: '{}') ...", worldFolderName);
+        log.info("Avvio Minecraft in modalità Single-JVM Host (Mondo: '{}', auto-join: {}) ...",
+                worldFolderName, worldSaveExists ? "SI (--world)" : "NO (crea o apri il mondo da Giocatore Singolo)");
         ProcessBuilder pb = new ProcessBuilder(cmd)
                 .redirectErrorStream(true)
                 .redirectOutput(ProcessBuilder.Redirect.to(logFile.toFile()))

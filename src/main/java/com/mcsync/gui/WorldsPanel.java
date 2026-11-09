@@ -518,7 +518,6 @@ public final class WorldsPanel extends JPanel {
             return;
         }
         controller.selectWorldAsync(w.id(), () -> {
-            refreshWorlds();
             mainFrame.selectMonitorTabOnHost();
             controller.startSession(true);
         });
@@ -541,8 +540,8 @@ public final class WorldsPanel extends JPanel {
         JTextField txtServerPack = new JTextField(26);
         JButton btnBrowseServer = new JButton("Sfoglia (Opzionale)...");
 
-        JSpinner spRamMin = new JSpinner(new SpinnerNumberModel(4096, 1024, 32768, 512));
-        JSpinner spRamMax = new JSpinner(new SpinnerNumberModel(6144, 2048, 32768, 512));
+        JSpinner spRamMin = new JSpinner(new SpinnerNumberModel(6144, 1024, 32768, 512));
+        JSpinner spRamMax = new JSpinner(new SpinnerNumberModel(8192, 2048, 32768, 512));
         JSpinner spPort = new JSpinner(new SpinnerNumberModel(25565, 1024, 65535, 1));
         JCheckBox chkExportInvite = new JCheckBox("Esporta subito il file d'invito (.mcsync) dopo la creazione", true);
 

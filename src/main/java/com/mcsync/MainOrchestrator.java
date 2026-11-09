@@ -62,6 +62,12 @@ public final class MainOrchestrator implements AutoCloseable {
     private static final int EXIT_ERROR = 1;
     private static final int EXIT_CONFIG = 2;
 
+    private static final AtomicBoolean SESSION_ACTIVE = new AtomicBoolean(false);
+
+    public static boolean isSessionActive() {
+        return SESSION_ACTIVE.get();
+    }
+
     private volatile Config cfg;
     private final boolean launchClient;
     private final S3Storage storage;
@@ -456,6 +462,7 @@ public final class MainOrchestrator implements AutoCloseable {
             log.error("Another mcServer4all instance is already running on this PC for {}", cfg.serverDir());
             return EXIT_ERROR;
         }
+        SESSION_ACTIVE.set(true);
         Thread hook = new Thread(this::onJvmShutdown, "shutdown-hook");
         Runtime.getRuntime().addShutdownHook(hook);
 
@@ -530,6 +537,7 @@ public final class MainOrchestrator implements AutoCloseable {
             teardown("error: " + e.getMessage());
             return EXIT_ERROR;
         } finally {
+            SESSION_ACTIVE.set(false);
             if (!teardownDone.get() && lockManager.isHeld()) teardown("exit");
             try {
                 Runtime.getRuntime().removeShutdownHook(hook);
@@ -590,8 +598,14 @@ public final class MainOrchestrator implements AutoCloseable {
         probeController.shutdownMonitor();
 
         Optional<WorldManifest> remote = worldSync.fetchRemoteManifest();
+        if (remote.isPresent() && remote.get().sizeBytes() == 0
+                && (remote.get().worldFiles() == null || remote.get().worldFiles().isEmpty())
+                && (remote.get().sha256() == null || remote.get().sha256().isBlank())) {
+            log.warn("Remote manifest v{} is empty (0 files, 0 bytes): ignoring empty manifest.", remote.get().version());
+            remote = Optional.empty();
+        }
         LocalState local = localState.get();
-        boolean worldExists = Files.isDirectory(cfg.worldDir());
+        boolean worldExists = Files.isRegularFile(cfg.worldDir().resolve("level.dat"));
         if (remote.isEmpty()) {
             log.info(worldExists ? "No remote world yet: the local world will be uploaded at the end of the session"
                     : "No remote world and no local world: the server will generate a new one");
@@ -645,14 +659,17 @@ public final class MainOrchestrator implements AutoCloseable {
             integratedHost = new com.mcsync.core.IntegratedHostController(cfg, new ServerListener());
             integratedHost.prepareClientWorldForHosting();
             localState.update(s -> s.withDirty(true, lockManager.sessionId()));
-            integratedHost.startSingleJvmHost(clientLauncher);
-
             long version = Math.max(localState.get().worldVersion(), remote.map(WorldManifest::version).orElse(0L));
-            lockManager.updateStatus(LockFile.Status.ONLINE);
-            discord.serverOnline(cfg.playerId(), cfg.localTailscaleIp(), cfg.serverPort(), version);
+            integratedHost.setOnReadyCallback(() -> {
+                lockManager.updateStatus(LockFile.Status.ONLINE);
+                discord.serverOnline(cfg.playerId(), cfg.localTailscaleIp(), cfg.serverPort(), version);
+                log.info("==> Single-JVM Integrated Host ONLINE at {}:{} (50% RAM saved! Exit world to Main Menu for Fast Handover)",
+                        cfg.localTailscaleIp(), cfg.serverPort());
+            });
+            integratedHost.startSingleJvmHost(clientLauncher);
             transition(OrchestratorState.HOSTING);
             if (consoleInputEnabled) startConsoleInput();
-            log.info("==> Single-JVM Integrated Host ONLINE at {}:{} (50% RAM saved! Exit world to Main Menu for Fast Handover)",
+            log.info("==> Single-JVM Host avviato: avvio del mondo e apertura automatica LAN su {}:{} ...",
                     cfg.localTailscaleIp(), cfg.serverPort());
 
             String reason = shutdownSignal.get();
@@ -816,17 +833,24 @@ public final class MainOrchestrator implements AutoCloseable {
                 }
 
                 boolean wasStarted = (s != null && s.wasStarted()) || ih != null;
+                boolean hasValidWorld = Files.isRegularFile(cfg.worldDir().resolve("level.dat"));
                 if (wasStarted && (lockManager.isHeld() || lockLost)) {
-                    transition(OrchestratorState.SYNCING_UP);
-                    if (lockLost) {
-                        try {
-                            String key = worldSync.pushConflictCopy();
-                            log.warn("Session saved to {} (lock was lost). Restore it manually if needed.", key);
-                        } catch (Exception e) {
-                            log.error("Could not upload the conflict copy: {}", e.getMessage());
-                        }
+                    if (!hasValidWorld) {
+                        log.info("Nessun mondo valido trovato in {} (sessione chiusa prima della creazione/apertura del mondo): salto l'upload e rilascio il lock.", cfg.worldDir());
+                        localState.update(st -> st.withDirty(false, null));
+                        success = true;
                     } else {
-                        success = pushWithRetry(clean, startedAt);
+                        transition(OrchestratorState.SYNCING_UP);
+                        if (lockLost) {
+                            try {
+                                String key = worldSync.pushConflictCopy();
+                                log.warn("Session saved to {} (lock was lost). Restore it manually if needed.", key);
+                            } catch (Exception e) {
+                                log.error("Could not upload the conflict copy: {}", e.getMessage());
+                            }
+                        } else {
+                            success = pushWithRetry(clean, startedAt);
+                        }
                     }
                 }
 
@@ -978,6 +1002,17 @@ public final class MainOrchestrator implements AutoCloseable {
     public Snapshot snapshot() throws IOException {
         storage.checkAccess();
         LockManager.Inspection insp = lockManager.inspect();
+        LocalState ls = localState.get();
+        if (insp.state() == LockManager.State.OWN_LEFTOVER && !isSessionActive()) {
+            boolean hasValidWorld = Files.isRegularFile(cfg.worldDir().resolve("level.dat"));
+            if (!ls.dirty() || !hasValidWorld) {
+                try {
+                    storage.delete(LockManager.LOCK_KEY);
+                    insp = new LockManager.Inspection(LockManager.State.FREE, null, null, 0);
+                } catch (Exception ignored) {
+                }
+            }
+        }
         Optional<WorldManifest> m = worldSync.fetchRemoteManifest();
         int backups;
         try {
@@ -985,7 +1020,7 @@ public final class MainOrchestrator implements AutoCloseable {
         } catch (RuntimeException e) {
             backups = 0;
         }
-        return new Snapshot(insp, m, localState.get(), backups, modsSync.hasPendingUpdates());
+        return new Snapshot(insp, m, ls, backups, modsSync.hasPendingUpdates());
     }
 
     private void safeObserve(java.util.function.Consumer<Observer> c) {

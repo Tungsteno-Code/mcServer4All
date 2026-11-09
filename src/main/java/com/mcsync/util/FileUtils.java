@@ -36,6 +36,10 @@ public final class FileUtils {
         return HexFormat.of().formatHex(md.digest());
     }
 
+    public static String sha256(byte[] data) {
+        return HexFormat.of().formatHex(sha256().digest(data));
+    }
+
     /** Recursively deletes a directory, clearing DOS read-only flags and retrying transient locks. */
     public static void deleteRecursively(Path root) throws IOException {
         if (!Files.exists(root, LinkOption.NOFOLLOW_LINKS)) return;

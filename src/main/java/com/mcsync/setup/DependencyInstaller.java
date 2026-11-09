@@ -348,6 +348,21 @@ public final class DependencyInstaller {
             updated = updated.with(java.util.Map.of("serverJavaHome", home.toString()));
         }
 
+        // Check if the configured -jar <file> exists; if not, auto-detect the server pack layout (@libraries/... or runnable jar)
+        List<String> origCmd = new ArrayList<>(cfg.serverStartCommand());
+        int origJarIdx = origCmd.indexOf("-jar");
+        if (origJarIdx >= 0 && origJarIdx + 1 < origCmd.size()) {
+            Path jarFile = serverDir.resolve(origCmd.get(origJarIdx + 1));
+            if (!Files.isRegularFile(jarFile)) {
+                String javaBin = (java21 != null && Files.isRegularFile(java21)) ? java21.toString() : origCmd.get(0);
+                List<String> detected = detectServerStartCommand(serverDir, javaBin);
+                if (detected != null) {
+                    log.info("Comando server rilevato automaticamente per il Server Pack: {}", detected);
+                    return copyWithServerCommand(updated, detected);
+                }
+            }
+        }
+
         // Pre-flight validation / auto-detection of the start command (run.bat, Fabric jar, ...)
         List<String> repaired = ServerProfileDetector.repairCommand(cfg.serverStartCommand(), serverDir);
         if (repaired.isEmpty()) return updated;
@@ -362,18 +377,6 @@ public final class DependencyInstaller {
             cmd.set(0, java21.toString());
         }
 
-        // Check if the configured -jar <file> exists; if not, auto-detect the server pack layout
-        int jarIdx = cmd.indexOf("-jar");
-        if (jarIdx >= 0 && jarIdx + 1 < cmd.size()) {
-            Path jarFile = serverDir.resolve(cmd.get(jarIdx + 1));
-            if (!Files.isRegularFile(jarFile)) {
-                List<String> detected = detectServerStartCommand(serverDir, cmd.get(0));
-                if (detected != null) {
-                    log.info("Comando server rilevato automaticamente per il Server Pack: {}", detected);
-                    return copyWithServerCommand(updated, detected);
-                }
-            }
-        }
         return copyWithServerCommand(updated, cmd);
     }
 
